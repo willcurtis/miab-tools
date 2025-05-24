@@ -28,7 +28,7 @@ def create_env_file(host, email, password):
     set_key(ENV_PATH, "MIAB_HOST", host)
     set_key(ENV_PATH, "MIAB_EMAIL", email)
     set_key(ENV_PATH, "MIAB_PASSWORD", password)
-    print("\u2705 .env file created/updated successfully.")
+    print("✅ .env file created/updated successfully.")
 
 def prompt_yes_no(message):
     try:
@@ -42,7 +42,12 @@ def find_existing_record(records, qname):
     return [r for r in records if r["qname"] == qname]
 
 def filter_records_by_domain(records, domain):
-    return [r for r in records if r["qname"].endswith(domain)]
+    domain = domain.lower().rstrip(".")
+    return [
+        r for r in records
+        if r["qname"].lower().rstrip(".") == domain
+        or r["qname"].lower().rstrip(".").endswith("." + domain)
+    ]
 
 def extend_records_with_source_tag(custom_records, external_records=None):
     for r in custom_records:
@@ -91,7 +96,7 @@ class MailInABoxDNSBasicAuth:
         return self._get("/dns/zones")
 
     def get_zonefile(self, zone):
-        return self._get(f"/dns/zones/{zone}")
+        return self._get(f"/dns/zonefile/{zone}", as_text=True)
 
     def update_dns(self, force=False):
         return self._post("/dns/update", {"force": str(force).lower()})
@@ -102,31 +107,18 @@ class MailInABoxDNSBasicAuth:
     def add_secondary_nameservers(self, hostnames):
         return self._post("/dns/secondary_nameservers", {"hostnames": hostnames})
 
-    def _get(self, endpoint):
+    def _get(self, endpoint, as_text=False):
         resp = self.session.get(self.base_url + endpoint)
         resp.raise_for_status()
-        return resp.json()
+        return resp.text if as_text else resp.json()
 
     def _post(self, endpoint, data):
         resp = self.session.post(self.base_url + endpoint, data=data)
         resp.raise_for_status()
         return resp.json()
 
-def get_combined_records(dns, domain_filter=None, qname=None, rtype=None):
-    custom = dns.list_records()
-    try:
-        external = dns.get_external_zonefile(domain_filter or (qname.split(".", 1)[-1] if qname else None))
-    except Exception:
-        external = []
-    all_records = extend_records_with_source_tag(custom, external)
-    if domain_filter:
-        return filter_records_by_domain(all_records, domain_filter)
-    if qname and rtype:
-        return [r for r in all_records if r["qname"] == qname and r["rtype"] == rtype]
-    return all_records
-
 def print_pretty(command, result):
-    if command in ("list-records", "get-record", "get-zonefile"):
+    if command in ("list-records", "get-record"):
         show_source = any("source" in r for r in result)
         headers = ["Name", "Type", "Value"] + (["Source"] if show_source else [])
         table = [
@@ -134,8 +126,10 @@ def print_pretty(command, result):
             for r in result
         ]
         print(tabulate(table, headers=headers, tablefmt="fancy_grid"))
+    elif command == "get-zonefile":
+        print(result.strip())
     elif command in ("add-record", "update-record", "remove-record"):
-        print(f"\u2705 {result['message']}")
+        print(f"✅ {result['message']}")
     elif command == "list-zones":
         print(tabulate([[z] for z in result], headers=["Zone"], tablefmt="grid"))
     elif command == "get-secondary-ns":
@@ -154,10 +148,7 @@ def cli_main():
         print("Run the script again with a command.")
         sys.exit(0)
 
-    parser = argparse.ArgumentParser(
-        description="\U0001F4EC Mail-in-a-Box DNS CLI Tool",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description="📬 Mail-in-a-Box DNS CLI Tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list-records", help="List all DNS records, or filter by domain")
@@ -186,15 +177,13 @@ def cli_main():
 
     subparsers.add_parser("list-zones", help="List all zones")
 
-    zonefile_parser = subparsers.add_parser("get-zonefile", help="Get custom zonefile (default)")
+    zonefile_parser = subparsers.add_parser("get-zonefile", help="Get zonefile in raw text format")
     zonefile_parser.add_argument("zone")
-    zonefile_parser.add_argument("--external", action="store_true", help="Include external records")
 
     updatedns_parser = subparsers.add_parser("update-dns", help="Trigger DNS update")
     updatedns_parser.add_argument("--force", action="store_true")
 
     subparsers.add_parser("get-secondary-ns", help="List secondary nameservers")
-
     addns_parser = subparsers.add_parser("add-secondary-ns", help="Add secondary nameservers")
     addns_parser.add_argument("hostnames", help="Comma-separated list of NS")
 
@@ -205,16 +194,20 @@ def cli_main():
         dns = MailInABoxDNSBasicAuth(host, email, password)
 
         if args.command == "list-records":
-            result = get_combined_records(dns, domain_filter=args.domain) if args.external else dns.list_records()
+            records = dns.list_records()
+            if args.external and args.domain:
+                external = dns.get_external_zonefile(args.domain)
+                records = extend_records_with_source_tag(records, external)
+            result = filter_records_by_domain(records, args.domain) if args.domain else records
 
         elif args.command == "get-record":
-            result = get_combined_records(dns, qname=args.qname, rtype=args.rtype) if args.external else dns.get_record(args.qname, args.rtype)
+            result = dns.get_record(args.qname, args.rtype)
 
         elif args.command == "add-record":
             records = dns.list_records()
             existing = find_existing_record(records, args.qname)
             if any(r["rtype"] == args.rtype for r in existing):
-                print("\u26a0\ufe0f Existing record(s) for this name:")
+                print("⚠️ Existing record(s) for this name:")
                 print_pretty("list-records", existing)
                 if args.update or prompt_yes_no("Do you want to update this record? [y/N]"):
                     for r in existing:
@@ -222,7 +215,7 @@ def cli_main():
                             dns.remove_record(r["qname"], r["rtype"])
                     result = dns.add_record(args.qname, args.rtype, args.value)
                 else:
-                    print("\u274c Record was not added or updated.")
+                    print("❌ Record was not added or updated.")
                     return
             else:
                 result = dns.add_record(args.qname, args.rtype, args.value)
@@ -237,14 +230,7 @@ def cli_main():
             result = dns.list_zones()
 
         elif args.command == "get-zonefile":
-            custom = dns.get_zonefile(args.zone)
-            external = []
-            if args.external:
-                try:
-                    external = dns.get_external_zonefile(args.zone)
-                except:
-                    print("\u26a0\ufe0f No external records found or supported.")
-            result = extend_records_with_source_tag(custom, external)
+            result = dns.get_zonefile(args.zone)
 
         elif args.command == "update-dns":
             result = dns.update_dns(force=args.force)
@@ -254,10 +240,6 @@ def cli_main():
 
         elif args.command == "add-secondary-ns":
             result = dns.add_secondary_nameservers(args.hostnames)
-
-        else:
-            parser.print_help()
-            sys.exit(0)
 
         print_pretty(args.command, result)
 
