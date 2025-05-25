@@ -140,25 +140,15 @@ def print_pretty(command, result):
         print(json.dumps(result, indent=2))
 
 def cli_main():
-    if "--setup-env" in sys.argv:
-        host = input("MIAB host (e.g. box.example.com): ")
-        email = input("MIAB email: ")
-        password = input("MIAB password: ")
-        create_env_file(host, email, password)
-        print("Run the script again with a command.")
-        sys.exit(0)
-
     parser = argparse.ArgumentParser(description="📬 Mail-in-a-Box DNS CLI Tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list-records", help="List all DNS records, or filter by domain")
     list_parser.add_argument("domain", nargs="?", help="Filter by domain (optional)")
-    list_parser.add_argument("--external", action="store_true", help="Include external (system) records")
 
     get_parser = subparsers.add_parser("get-record", help="Get a DNS record by name and type")
     get_parser.add_argument("qname")
     get_parser.add_argument("rtype")
-    get_parser.add_argument("--external", action="store_true", help="Include external (system) records")
 
     add_parser = subparsers.add_parser("add-record", help="Add a DNS record")
     add_parser.add_argument("qname")
@@ -195,9 +185,6 @@ def cli_main():
 
         if args.command == "list-records":
             records = dns.list_records()
-            if args.external and args.domain:
-                external = dns.get_external_zonefile(args.domain)
-                records = extend_records_with_source_tag(records, external)
             result = filter_records_by_domain(records, args.domain) if args.domain else records
 
         elif args.command == "get-record":
@@ -224,6 +211,10 @@ def cli_main():
             result = dns.update_record(args.qname, args.rtype, args.value)
 
         elif args.command == "remove-record":
+            existing = dns.get_record(args.qname, args.rtype)
+            if not existing:
+                print(f"❌ No record found for {args.qname} with type {args.rtype}.")
+                sys.exit(1)
             result = dns.remove_record(args.qname, args.rtype)
 
         elif args.command == "list-zones":
